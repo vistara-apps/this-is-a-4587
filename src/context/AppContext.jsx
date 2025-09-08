@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
 import { useAccount } from 'wagmi';
+import { blockchainService, CONTRACTS } from '../services/blockchain';
+import { supabaseService } from '../services/supabase';
 
 const AppContext = createContext();
 
@@ -89,25 +91,98 @@ export function AppProvider({ children }) {
 
   useEffect(() => {
     if (isConnected && address) {
-      // Initialize user data
+      initializeUserData(address);
+    } else {
+      dispatch({ type: 'SET_USER', payload: null });
+      dispatch({ type: 'SET_DEPOSITS', payload: [] });
+      dispatch({ type: 'SET_TOTALS', payload: { totalLocked: 0, totalEarned: 0 } });
+    }
+  }, [isConnected, address]);
+
+  const initializeUserData = async (walletAddress) => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      // Initialize user in backend
+      const user = await supabaseService.initializeUser(walletAddress);
+      
       dispatch({
         type: 'SET_USER',
         payload: {
-          userId: address,
-          walletAddress: address,
-          subscriptionTier: 'free',
-          createdAt: new Date(),
+          userId: walletAddress,
+          walletAddress: walletAddress,
+          subscriptionTier: user?.subscription_tier || 'free',
+          createdAt: new Date(user?.created_at || Date.now()),
         },
       });
 
-      // Load mock deposits
-      dispatch({ type: 'SET_DEPOSITS', payload: mockDeposits });
+      dispatch({
+        type: 'SET_SUBSCRIPTION_TIER',
+        payload: user?.subscription_tier || 'free',
+      });
+
+      // Try to load real deposits from blockchain
+      try {
+        const deposits = await blockchainService.getUserDeposits(walletAddress);
+        dispatch({ type: 'SET_DEPOSITS', payload: deposits });
+        
+        // Calculate totals from real data
+        const totalLocked = deposits
+          .filter(d => d.status === 'active')
+          .reduce((sum, d) => {
+            if (d.cryptoAsset === 'WETH') return sum + (d.amount * 3000); // Mock ETH price
+            return sum + d.amount;
+          }, 0);
+        
+        const totalEarned = deposits.reduce((sum, d) => {
+          if (d.cryptoAsset === 'WETH') return sum + (d.earned * 3000);
+          return sum + d.earned;
+        }, 0);
+
+        dispatch({
+          type: 'SET_TOTALS',
+          payload: { totalLocked, totalEarned },
+        });
+
+        // Track user connection
+        await supabaseService.trackUserAction(walletAddress, 'wallet_connected');
+      } catch (blockchainError) {
+        console.warn('Blockchain not available, using cached/mock data:', blockchainError);
+        
+        // Fallback to cached data or mock data
+        const cachedDeposits = await supabaseService.getCachedDeposits(walletAddress);
+        const depositsToUse = cachedDeposits.length > 0 ? cachedDeposits : mockDeposits;
+        
+        dispatch({ type: 'SET_DEPOSITS', payload: depositsToUse });
+        
+        // Calculate totals from fallback data
+        const totalLocked = depositsToUse
+          .filter(d => d.status === 'active')
+          .reduce((sum, d) => {
+            if (d.cryptoAsset === 'ETH' || d.cryptoAsset === 'WETH') return sum + (d.amount * 3000);
+            return sum + d.amount;
+          }, 0);
+        
+        const totalEarned = depositsToUse.reduce((sum, d) => {
+          if (d.cryptoAsset === 'ETH' || d.cryptoAsset === 'WETH') return sum + (d.earned * 3000);
+          return sum + d.earned;
+        }, 0);
+
+        dispatch({
+          type: 'SET_TOTALS',
+          payload: { totalLocked, totalEarned },
+        });
+      }
+    } catch (error) {
+      console.error('Error initializing user data:', error);
+      dispatch({ type: 'SET_ERROR', payload: error.message });
       
-      // Calculate totals
+      // Fallback to mock data
+      dispatch({ type: 'SET_DEPOSITS', payload: mockDeposits });
       const totalLocked = mockDeposits
         .filter(d => d.status === 'active')
         .reduce((sum, d) => {
-          if (d.cryptoAsset === 'ETH') return sum + (d.amount * 3000); // Mock ETH price
+          if (d.cryptoAsset === 'ETH') return sum + (d.amount * 3000);
           return sum + d.amount;
         }, 0);
       
@@ -120,57 +195,148 @@ export function AppProvider({ children }) {
         type: 'SET_TOTALS',
         payload: { totalLocked, totalEarned },
       });
-    } else {
-      dispatch({ type: 'SET_USER', payload: null });
-      dispatch({ type: 'SET_DEPOSITS', payload: [] });
-      dispatch({ type: 'SET_TOTALS', payload: { totalLocked: 0, totalEarned: 0 } });
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
     }
-  }, [isConnected, address]);
-
-  const createDeposit = (depositData) => {
-    const newDeposit = {
-      depositId: Date.now().toString(),
-      userId: address,
-      walletAddress: address,
-      ...depositData,
-      startDate: new Date(),
-      endDate: new Date(Date.now() + depositData.lockPeriod * 24 * 60 * 60 * 1000),
-      status: 'active',
-      earned: 0,
-      createdAt: new Date(),
-    };
-
-    dispatch({ type: 'ADD_DEPOSIT', payload: newDeposit });
-    
-    // Update totals
-    const newTotalLocked = state.totalLocked + (
-      depositData.cryptoAsset === 'ETH' ? depositData.amount * 3000 : depositData.amount
-    );
-    
-    dispatch({
-      type: 'SET_TOTALS',
-      payload: { totalLocked: newTotalLocked, totalEarned: state.totalEarned },
-    });
-
-    return newDeposit;
   };
 
-  const claimDeposit = (depositId) => {
-    const deposit = state.deposits.find(d => d.depositId === depositId);
-    if (deposit && deposit.status === 'active') {
-      dispatch({
-        type: 'UPDATE_DEPOSIT',
-        payload: { depositId, status: 'completed' },
-      });
+  const createDeposit = async (depositData) => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      // Get token address based on symbol
+      const tokenAddress = depositData.cryptoAsset === 'USDC' 
+        ? CONTRACTS.USDC 
+        : CONTRACTS.WETH;
 
-      // Update totals
-      const depositValue = deposit.cryptoAsset === 'ETH' ? deposit.amount * 3000 : deposit.amount;
-      const newTotalLocked = state.totalLocked - depositValue;
+      // Create deposit on blockchain
+      const result = await blockchainService.createDeposit(
+        tokenAddress,
+        depositData.amount,
+        depositData.lockPeriod
+      );
+
+      if (result.status === 'confirmed') {
+        // Create deposit object
+        const newDeposit = {
+          depositId: Date.now().toString(),
+          userId: address,
+          walletAddress: address,
+          ...depositData,
+          startDate: new Date(),
+          endDate: new Date(Date.now() + depositData.lockPeriod * 24 * 60 * 60 * 1000),
+          status: 'active',
+          earned: 0,
+          transactionHash: result.transactionHash,
+          createdAt: new Date(),
+        };
+
+        dispatch({ type: 'ADD_DEPOSIT', payload: newDeposit });
+        
+        // Update totals
+        const newTotalLocked = state.totalLocked + (
+          depositData.cryptoAsset === 'WETH' ? depositData.amount * 3000 : depositData.amount
+        );
+        
+        dispatch({
+          type: 'SET_TOTALS',
+          payload: { totalLocked: newTotalLocked, totalEarned: state.totalEarned },
+        });
+
+        // Cache deposit in backend
+        await supabaseService.cacheDeposit(newDeposit);
+        
+        // Track user action
+        await supabaseService.trackUserAction(address, 'deposit_created', {
+          amount: depositData.amount,
+          asset: depositData.cryptoAsset,
+          lockPeriod: depositData.lockPeriod,
+        });
+
+        return newDeposit;
+      } else {
+        throw new Error('Transaction failed');
+      }
+    } catch (error) {
+      console.error('Error creating deposit:', error);
+      dispatch({ type: 'SET_ERROR', payload: error.message });
+      throw error;
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  };
+
+  const claimDeposit = async (depositId) => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      const deposit = state.deposits.find(d => d.depositId === depositId);
+      if (!deposit || deposit.status !== 'active') {
+        throw new Error('Invalid deposit or already claimed');
+      }
+
+      // Claim deposit on blockchain
+      const result = await blockchainService.claimDeposit(depositId);
+
+      if (result.status === 'confirmed') {
+        dispatch({
+          type: 'UPDATE_DEPOSIT',
+          payload: { depositId, status: 'completed' },
+        });
+
+        // Update totals
+        const depositValue = deposit.cryptoAsset === 'WETH' ? deposit.amount * 3000 : deposit.amount;
+        const newTotalLocked = state.totalLocked - depositValue;
+        
+        dispatch({
+          type: 'SET_TOTALS',
+          payload: { totalLocked: newTotalLocked, totalEarned: state.totalEarned },
+        });
+
+        // Update cache
+        await supabaseService.cacheDeposit({
+          ...deposit,
+          status: 'completed',
+          transactionHash: result.transactionHash,
+        });
+
+        // Track user action
+        await supabaseService.trackUserAction(address, 'deposit_claimed', {
+          depositId,
+          amount: deposit.amount,
+          asset: deposit.cryptoAsset,
+        });
+
+        return result;
+      } else {
+        throw new Error('Transaction failed');
+      }
+    } catch (error) {
+      console.error('Error claiming deposit:', error);
+      dispatch({ type: 'SET_ERROR', payload: error.message });
+      throw error;
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  };
+
+  const upgradeSubscription = async (tier) => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    
+    try {
+      await supabaseService.updateSubscriptionTier(address, tier);
+      dispatch({ type: 'SET_SUBSCRIPTION_TIER', payload: tier });
       
-      dispatch({
-        type: 'SET_TOTALS',
-        payload: { totalLocked: newTotalLocked, totalEarned: state.totalEarned },
-      });
+      // Track user action
+      await supabaseService.trackUserAction(address, 'subscription_upgraded', { tier });
+      
+      return { success: true };
+    } catch (error) {
+      console.error('Error upgrading subscription:', error);
+      dispatch({ type: 'SET_ERROR', payload: error.message });
+      throw error;
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
     }
   };
 
@@ -178,6 +344,7 @@ export function AppProvider({ children }) {
     ...state,
     createDeposit,
     claimDeposit,
+    upgradeSubscription,
     dispatch,
   };
 

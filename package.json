@@ -16,7 +16,8 @@
     "viem": "^2.0.0",
     "wagmi": "^2.15.6",
     "lucide-react": "^0.263.1",
-    "recharts": "^2.8.0"
+    "recharts": "^2.8.0",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "devDependencies": {
     "@types/react": "^18.0.28",

@@ -4,10 +4,12 @@ import { Plus, TrendingUp, Clock, DollarSign, BarChart3 } from 'lucide-react';
 import PortfolioChart from './PortfolioChart';
 import DepositCard from './DepositCard';
 import StatsCard from './StatsCard';
+import SubscriptionModal from './SubscriptionModal';
 
 function Dashboard({ onDeposit }) {
   const { deposits, totalLocked, totalEarned, subscriptionTier } = useApp();
   const [activeTab, setActiveTab] = useState('overview');
+  const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
 
   const activeDeposits = deposits.filter(d => d.status === 'active');
   const completedDeposits = deposits.filter(d => d.status === 'completed');
@@ -48,7 +50,12 @@ function Dashboard({ onDeposit }) {
               {subscriptionTier === 'free' ? 'Free Tier' : 'Premium Tier'}
             </span>
             {subscriptionTier === 'free' && (
-              <span className="text-xs text-yellow-200">Upgrade for higher APY</span>
+              <button
+                onClick={() => setShowSubscriptionModal(true)}
+                className="text-yellow-300 hover:text-yellow-200 text-sm font-medium transition-colors ml-2"
+              >
+                Upgrade to Premium
+              </button>
             )}
           </div>
         </div>
@@ -231,6 +238,11 @@ function Dashboard({ onDeposit }) {
           )}
         </div>
       </div>
+
+      {/* Subscription Modal */}
+      {showSubscriptionModal && (
+        <SubscriptionModal onClose={() => setShowSubscriptionModal(false)} />
+      )}
     </div>
   );
 }
